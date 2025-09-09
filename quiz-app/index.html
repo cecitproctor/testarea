@@ -1,0 +1,321 @@
+# Quiz-Excel Starter (Next.js) — Single-file repo layout
+
+This document contains a complete starter repo you can copy/paste into a new GitHub repository and deploy on Vercel. It uses Next.js (app with pages), a serverless API route to read Google Sheets via a service account, and a simple frontend login/start form that matches your requested fields.
+
+---
+
+## Files & contents (create these in your repo)
+
+### package.json
+
+```json
+{
+  "name": "vercel-quiz-starter",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "googleapis": "^135.0.0",
+    "next": "13.5.6",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "nodemailer": "^6.9.4"
+  }
+}
+```
+
+---
+
+### .env.example
+
+```
+# Google Sheets
+GOOGLE_CLIENT_EMAIL=service-account@PROJECT.iam.gserviceaccount.com
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+SPREADSHEET_ID=your_google_spreadsheet_id_here
+
+# Email (optional) - for sending results
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USER=your-smtp-user
+SMTP_PASS=your-smtp-pass
+
+# Other
+NEXT_PUBLIC_APP_NAME=QuizStarter
+```
+
+> **Important**: In Vercel, set `GOOGLE_PRIVATE_KEY` exactly with newlines encoded as `\n` (see README below). Do **not** commit real keys to Git.
+
+---
+
+### README.md (short deploy + setup)
+
+```
+# Vercel Quiz Starter
+
+1. Create a Google Cloud Service Account, enable Google Sheets API.
+   - Give the service account `Editor` (or at least Sheets read access) to the spreadsheet.
+   - Download the JSON credentials.
+   - Copy `client_email` -> `GOOGLE_CLIENT_EMAIL`
+   - Copy `private_key` -> `GOOGLE_PRIVATE_KEY` (escape line breaks as \n when adding to Vercel env)
+
+2. Create a Google Spreadsheet with tabs named as quiz codes. Use your Excel layout per tab.
+   - Add a `SETTINGS` sheet for teacher email, subject, and timer options.
+
+3. Fill `.env` (or set Vercel Environment Variables) using `.env.example`.
+
+4. Push to GitHub and import to Vercel. Set Environment Variables in the Vercel dashboard.
+
+5. Deploy. The API route `/api/quiz?code=QUIZCODE` will fetch the sheet tab values.
+
+```
+
+---
+
+### pages/index.js (frontend form + start button)
+
+```jsx
+import { useState } from 'react';
+
+export default function Home() {
+  const [form, setForm] = useState({ accountId: '', name: '', email: '', quizCode: '', day: 'MW', time: '7:30 AM' });
+  const times = ["7:30 AM","9:00 AM","10:30 AM","12:00 PM","1:30 PM","3:00 PM","4:30 PM","6:00 PM","7:30 PM","9:00 PM"];
+
+  function handleChange(e){
+    setForm({ ...form, [e.target.name]: e.target.value });
+  }
+
+  async function startQuiz(e){
+    e.preventDefault();
+    // Fetch quiz from server (server will read Google Sheets)
+    const res = await fetch(`/api/quiz?code=${encodeURIComponent(form.quizCode)}`);
+    if(!res.ok){
+      const txt = await res.text();
+      alert('Error fetching quiz: ' + txt);
+      return;
+    }
+    const data = await res.json();
+    // store user info and quiz in sessionStorage then redirect to /quiz
+    sessionStorage.setItem('quizUser', JSON.stringify(form));
+    sessionStorage.setItem('quizData', JSON.stringify(data));
+    window.location.href = '/quiz';
+  }
+
+  return (
+    <div style={{fontFamily:'Arial, sans-serif', padding:20, maxWidth:700, margin:'0 auto'}}>
+      <h1>Quiz Login / Start</h1>
+      <form onSubmit={startQuiz} style={{display:'grid', gap:10}}>
+        <input name="accountId" placeholder="Account ID" value={form.accountId} onChange={handleChange} required />
+        <input name="name" placeholder="Full Name" value={form.name} onChange={handleChange} required />
+        <input name="email" type="email" placeholder="Email" value={form.email} onChange={handleChange} required />
+        <input name="quizCode" placeholder="Quiz Code (Sheet name)" value={form.quizCode} onChange={handleChange} required />
+
+        <label>
+          Day Schedule
+          <select name="day" value={form.day} onChange={handleChange}>
+            <option>MW</option>
+            <option>TTh</option>
+            <option>FS</option>
+          </select>
+        </label>
+
+        <label>
+          Time Schedule
+          <select name="time" value={form.time} onChange={handleChange}>
+            {times.map(t => <option key={t}>{t}</option>)}
+          </select>
+        </label>
+
+        <button type="submit">Start</button>
+      </form>
+
+      <p style={{marginTop:20, color:'#555'}}>This will fetch the sheet named <b>Quiz Code</b> and redirect to the quiz page.</p>
+    </div>
+  );
+}
+```
+
+---
+
+### pages/quiz.js (simple viewer + scoring flow)
+
+```jsx
+import { useEffect, useState } from 'react';
+
+export default function QuizPage(){
+  const [user, setUser] = useState(null);
+  const [quiz, setQuiz] = useState(null);
+  const [answers, setAnswers] = useState({});
+
+  useEffect(()=>{
+    const u = sessionStorage.getItem('quizUser');
+    const q = sessionStorage.getItem('quizData');
+    if(!u || !q){ window.location.href = '/'; return; }
+    setUser(JSON.parse(u));
+    setQuiz(JSON.parse(q));
+  },[]);
+
+  if(!quiz) return <div>Loading...</div>;
+
+  // quiz is raw 2D array from Sheets. For this starter we render rows where first cell isn't blank
+  const rows = quiz.values || quiz;
+
+  function handleAns(i, val){ setAnswers({...answers, [i]: val}); }
+
+  async function submit(){
+    // simple grading: find 'correct answer' column heuristically
+    // Look for header row (first row that includes 'Question' or 'question')
+    let headerIdx = rows.findIndex(r => r && r[0] && /question/i.test(r[0]));
+    if(headerIdx === -1) headerIdx = 0;
+    const header = rows[headerIdx];
+    const correctCol = header.findIndex(c => /correct/i.test((c||'').toString()));
+    const qCol = header.findIndex(c => /question/i.test((c||'').toString()));
+
+    let total = 0, got = 0;
+    for(let i = headerIdx+1; i < rows.length; i++){
+      const row = rows[i];
+      if(!row || !row[qCol]) continue;
+      const score = Number(row[header.findIndex(c=>/score/i.test((c||'').toString()))] || 1);
+      total += score;
+      const correct = (row[correctCol] || '').toString().trim();
+      const ans = (answers[i] || '').toString().trim();
+      if(correct && ans && correct.toLowerCase() === ans.toLowerCase()) got += score;
+    }
+
+    // send results to server to append to teacher sheet or email
+    await fetch('/api/submit', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ user, quizCode: sessionStorage.getItem('quizCode')||'', total, got, answers }) });
+
+    alert(`You scored ${got} / ${total}`);
+  }
+
+  return (
+    <div style={{fontFamily:'Arial, sans-serif', padding:20}}>
+      <h2>Quiz</h2>
+      <p>Student: {user && user.name} — {user && user.accountId}</p>
+
+      <div>
+        {rows.map((r,i) => {
+          if(i === 0) return null; // skip top
+          if(!r || !r[0]) return null;
+          return (
+            <div key={i} style={{padding:10, borderBottom:'1px solid #eee'}}>
+              <div><b>{r[0]}</b></div>
+              <div>
+                {/* render choice fields if present */}
+                {(r.slice(1,6).filter(Boolean)).map((c,j)=> (
+                  <label key={j} style={{display:'block'}}>
+                    <input type="radio" name={`q${i}`} value={c} onChange={(e)=>handleAns(i,e.target.value)} /> {c}
+                  </label>
+                ))}
+                {/* fallback text input */}
+                {(r.length <= 2) && (
+                  <input placeholder="Answer" onChange={(e)=>handleAns(i,e.target.value)} />
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <button onClick={submit} style={{marginTop:20}}>Submit</button>
+    </div>
+  );
+}
+```
+
+---
+
+### pages/api/quiz.js (serverless - fetch sheet values)
+
+```js
+import { google } from 'googleapis';
+
+export default async function handler(req, res){
+  const { code } = req.query;
+  if(!code) return res.status(400).send('Missing quiz code');
+
+  try{
+    const auth = new google.auth.JWT({
+      email: process.env.GOOGLE_CLIENT_EMAIL,
+      key: process.env.GOOGLE_PRIVATE_KEY && process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      scopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
+    });
+
+    const sheets = google.sheets({version:'v4', auth});
+    const range = `${code}!A1:Z999`;
+    const response = await sheets.spreadsheets.values.get({ spreadsheetId: process.env.SPREADSHEET_ID, range });
+    res.status(200).json(response.data);
+  }catch(err){
+    console.error(err);
+    res.status(500).send('Error reading sheet: ' + (err.message || err));
+  }
+}
+```
+
+---
+
+### pages/api/submit.js (serverless - append results & optionally email)
+
+```js
+import { google } from 'googleapis';
+import nodemailer from 'nodemailer';
+
+export default async function handler(req, res){
+  if(req.method !== 'POST') return res.status(405).end();
+  const body = req.body;
+
+  try{
+    // 1) append to a 'Results' sheet (you can change the sheet name or make it dynamic)
+    const auth = new google.auth.JWT({
+      email: process.env.GOOGLE_CLIENT_EMAIL,
+      key: process.env.GOOGLE_PRIVATE_KEY && process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    const sheets = google.sheets({version:'v4', auth});
+
+    const values = [[ new Date().toISOString(), body.user.accountId || '', body.user.name || '', body.user.email || '', body.quizCode || '', body.got, body.total, JSON.stringify(body.answers) ]];
+    await sheets.spreadsheets.values.append({ spreadsheetId: process.env.SPREADSHEET_ID, range: 'Results!A1', valueInputOption: 'RAW', requestBody: { values } });
+
+    // 2) optional: send email to teacher (teacher email must be present in SETTINGS sheet; for starter we skip fetching settings)
+    if(process.env.SMTP_HOST){
+      const transporter = nodemailer.createTransport({ host: process.env.SMTP_HOST, port: Number(process.env.SMTP_PORT||587), auth:{ user: process.env.SMTP_USER, pass: process.env.SMTP_PASS } });
+      await transporter.sendMail({ from: process.env.SMTP_USER, to: body.user.email, subject: 'Quiz Results', text: `You scored ${body.got} / ${body.total}` });
+    }
+
+    res.status(200).json({ ok:true });
+  }catch(err){
+    console.error(err);
+    res.status(500).json({ ok:false, error: err.message || String(err) });
+  }
+}
+```
+
+---
+
+## Notes, limitations & next steps
+1. This starter uses a **very simple** mapping between sheet rows and questions. Your Excel/Sheets format may need normalization/parsing code depending on how sections (MCQ, Identification, Matching) are laid out. I intentionally kept the parsing simple so you can adapt.
+2. For production: implement proper row-type parsing, CSRF protection, user authentication, test scheduling checks (date/time), and time-limited sessions.
+3. When adding to Vercel: set environment variables under Project Settings → Environment Variables. For `GOOGLE_PRIVATE_KEY`, replace real newlines with `\n` when adding via the UI.
+
+---
+
+## Helpful commands
+
+```bash
+# run locally (after installing deps and creating .env.local):
+npm install
+npm run dev
+```
+
+---
+
+Good luck! Copy these files into your repository and push to GitHub, then import to Vercel. If you'd like, I can:
+- Generate the full repo as a ZIP for download.
+- Expand the sheet-parsing logic to fully support your exact Excel structure (MCQ/Identification/Matching sections).
+- Add simple authentication (Magic links or Firebase Auth).
+
+Tell me which of the above you'd like next.
